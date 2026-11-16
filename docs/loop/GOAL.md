@@ -44,7 +44,7 @@ a green gate is false completeness.
 | App version | 0.8 (`versionCode` 42) |
 | Map | `LeafletMap.kt` + `assets/` (WebView bridge present, unverified on device) |
 | Account deletion | In-app, handles `FirebaseAuthRecentLoginRequiredException` |
-| `docs/account-deletion.html` | Present, still has `YOUR_SUPPORT_EMAIL_HERE` |
+| `docs/account-deletion.html` | Present, real support email set; store copy in `docs/store/` |
 
 ---
 
@@ -133,9 +133,12 @@ it works).
 
 ### W7 — Version and Play Store preparation
 
-- Bump to `versionCode`/`versionName` for v0.8.
+- Bump to `versionCode`/`versionName` for v0.8. **Done: 42 / "0.8".**
 - Replace `YOUR_SUPPORT_EMAIL_HERE` in `docs/account-deletion.html`.
+  **Done: `bernavicg1@gmail.com`.**
 - Privacy policy, data-safety declarations, screenshot list, descriptions.
+  **Done: `docs/store/{listing,data-safety,screenshots}.md`; the image assets
+  themselves need a phone.**
 
 **Accept:** no placeholder string remains; gate green.
 

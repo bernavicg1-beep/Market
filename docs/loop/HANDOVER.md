@@ -101,15 +101,20 @@ OSRM/Nominatim lookups remain unverified.
 - All four workflow files parse as YAML. **No workflow has been run on GitHub**,
   so a green Actions run is not claimed.
 
-### W7 — Version — partially done
+### W7 — Version and Play preparation — done
 
 - `versionCode = 42`, `versionName = "0.8"`.
-- **Blocked:** `docs/account-deletion.html` still contains
-  `YOUR_SUPPORT_EMAIL_HERE`, and `README.md` line 382 still tells the reader to
-  replace it. The support address is not recorded anywhere in this repository,
-  so it was not invented. Give the address and it is a one-line change.
-- Privacy policy, data-safety declarations and the store listing were not
-  written in this run.
+- `docs/account-deletion.html` now shows the real support address
+  (`bernavicg1@gmail.com`) as a `mailto:` link; no placeholder remains, and the
+  README no longer tells the reader to replace one.
+- Store material lives in `docs/store/`:
+  - `listing.md` — name, short description, full description, category,
+    contact, URLs and the “what's new” text.
+  - `data-safety.md` — every Data safety answer, the processor list, and the
+    permission justifications.
+  - `screenshots.md` — required sizes and the exact shots to take.
+- **Not done, because it needs a phone:** the screenshots, icon and feature
+  graphic themselves. Play will not accept the listing without them.
 
 ### W8 — This note
 
@@ -132,9 +137,11 @@ None of the following was observed working:
 
 1. Set the three Cloudinary secrets on the Worker
    (`wrangler secret put ...`), keeping the preset signed.
-2. Replace the support email placeholder with the real address, then submit the
-   public account-deletion URL in Play Console.
-3. Add `FIREBASE_SERVICE_ACCOUNT` to the repository secrets so rules deploy
+2. Enable GitHub Pages (Settings → Pages → Branch `main`, folder `/docs`), then
+   submit the account-deletion URL in Play Console → Data deletion.
+3. Take the screenshots, icon and feature graphic listed in
+   `docs/store/screenshots.md`.
+4. Add `FIREBASE_SERVICE_ACCOUNT` to the repository secrets so rules deploy
    from CI instead of being skipped.
-4. Post one listing from a real phone and confirm the photo lands in
+5. Post one listing from a real phone and confirm the photo lands in
    `camiguin_market/products/<uid>/` and appears on the listing.

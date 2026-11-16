@@ -379,8 +379,10 @@ If the app can create accounts, the user must be able to delete one:
   (Settings → Pages → Branch: `main`, folder: `/docs`) and put the URL in Play
   Console → *App content → Data deletion*.
 
-**Important:** replace `YOUR_SUPPORT_EMAIL_HERE` in `docs/account-deletion.html`
-with your real support email before publishing the page.
+The support address on that page is **bernavicg1@gmail.com**. If support moves
+to another mailbox, change it in `docs/account-deletion.html` and in
+`docs/store/listing.md` in the same commit, so the web page and the Play
+Console contact stay identical.
 
 If the user's login is old, Firebase returns
 `FirebaseAuthRecentLoginRequiredException` and asks them to log out/log in again —
