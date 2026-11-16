@@ -309,15 +309,15 @@ export default function CamiguinMarketApp() {
         {activeListings.length === 0 ? (
           <p style={{ color: '#777', fontSize: '14px' }}>No active listings yet.</p>
         ) : (
-          <ul style={{ listStyle: 'none', padding: '0', margin: '0', display: 'grid', gap: '8px' }}>
+          <ul style={{ listStyle: 'none', padding: '0', margin: '0', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '8px' }}>
             {activeListings.map((item) => (
               <li
                 key={item.id}
                 style={{ background: '#fff', padding: '12px', borderRadius: '10px', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                  <strong style={{ fontSize: '15px' }}>{item.title}</strong>
-                  <span style={{ color: '#0056b3', fontWeight: 'bold' }}>₱{item.price.toFixed(2)}</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                  <strong style={{ fontSize: '15px', minWidth: '0', overflowWrap: 'anywhere' }}>{item.title}</strong>
+                  <span style={{ color: '#0056b3', fontWeight: 'bold', marginLeft: 'auto', whiteSpace: 'nowrap' }}>₱{item.price.toFixed(2)}</span>
                 </div>
                 {item.isPerishable && item.expiresAt && (
                   <div style={{ marginTop: '6px', fontSize: '12px', color: '#856404' }}>
