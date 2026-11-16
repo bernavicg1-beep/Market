@@ -12,7 +12,7 @@ Everything here describes what the app actually does; nothing is aspirational.
 | Tags | — | Marketplace, Buy and sell, Local |
 | Contact email | — | `bernavicg1@gmail.com` |
 | Website | — | `https://bernavicg1-beep.github.io/Market/` (GitHub Pages, `/docs`) |
-| Privacy policy | — | `https://bernavicg1-beep.github.io/Market/account-deletion.html` |
+| Privacy policy | — | `https://bernavicg1-beep.github.io/Market/privacy-policy.html` |
 | Account deletion | — | same URL, submitted under *App content → Data deletion* |
 | Package | — | `com.camiguinmarket.app` |
 | Version | — | 0.8 (`versionCode` 42) |
