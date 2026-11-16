@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camiguin Market — Account Deletion</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 720px; margin: 0 auto; padding: 32px 20px 64px;
+    line-height: 1.6; color: #1b1b1b; background: #ffffff;
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 4px; }
+  h2 { font-size: 1.15rem; margin-top: 32px; }
+  .sub { color: #555; margin-top: 0; }
+  nav a { color: #1b7f5c; }
+  ol, ul { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .box {
+    background: #f4f8f6; border-left: 4px solid #1b7f5c;
+    padding: 12px 16px; border-radius: 6px; margin: 20px 0;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  code { background: #f2f2f2; padding: 1px 5px; border-radius: 4px; }
+  footer { margin-top: 40px; color: #666; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Account Deletion</h1>
+<p class="sub">Camiguin Market · <code>com.camiguinmarket.app</code></p>
+
+<p>
+  If you want to delete your <strong>Camiguin Market</strong> account and all of its
+  data, there are two ways: inside the app, or by email.
+</p>
+
+<h2>1. Inside the app (easiest)</h2>
+<ol>
+  <li>Sign in to the app with your account.</li>
+  <li>At the top of the screen, press the <strong>🗑️</strong> button.</li>
+  <li>Read the warning, then press <strong>Delete</strong>.</li>
+  <li>If your login is old, you will be asked to log out and log in again for
+      security, then try again.</li>
+</ol>
+<p>
+  After that your account is permanently deleted and you are signed out.
+</p>
+
+<h2>2. By email</h2>
+<p>
+  If you can no longer access the app, send an email requesting account deletion.
+  Include these details:
+</p>
+<ul>
+  <li>The <strong>email address</strong> used for the account.</li>
+  <li>The subject: <code>Account deletion request</code>.</li>
+</ul>
+<p>
+  Send it to: <strong><!-- REPLACE: put your support email here -->YOUR_SUPPORT_EMAIL_HERE</strong>
+</p>
+<p>
+  We reply within <strong>7 business days</strong> and complete the deletion
+  within <strong>30 days</strong>.
+</p>
+
+<div class="box">
+  <strong>Important:</strong> deletion is permanent. The account, its listings,
+  and their photos cannot be recovered.
+</div>
+
+<h2>What gets deleted</h2>
+<table>
+  <tr><th>Data</th><th>What happens</th></tr>
+  <tr>
+    <td>Account (email, password, display name)</td>
+    <td>Deleted from Firebase Authentication.</td>
+  </tr>
+  <tr>
+    <td>Listings (product name, price, description, contact, town, category)</td>
+    <td>Deleted from Firestore.</td>
+  </tr>
+  <tr>
+    <td>Pickup location (latitude/longitude)</td>
+    <td>Deleted together with the listing.</td>
+  </tr>
+</table>
+<p>
+  We keep no other copy of your data. Firebase backups expire after their normal
+  retention period (up to 30 days).
+</p>
+
+<h2>If you do not want to delete your account</h2>
+<p>
+  You can simply log out and stop using the app. Your data stays until you ask for
+  deletion.
+</p>
+
+<footer>
+  Camiguin Market · This page is used as the account-deletion URL on Google Play.
+</footer>
+</body>
+</html>
