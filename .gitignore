@@ -1,0 +1,35 @@
+# Secrets: MAPS_API_KEY, MAPBOX_ACCESS_TOKEN and the release signing key
+local.properties
+*.jks
+*.keystore
+keystore.properties
+*.jks.b64
+.secrets/
+
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+
+# Firebase emulator / CLI logs
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# IDE
+.idea/
+*.iml
+captures/
+.DS_Store
+
+# Cloudflare Wrangler local state
+worker/.wrangler/
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+__pycache__/
+*.pyc
