@@ -28,6 +28,9 @@ captures/
 worker/.wrangler/
 node_modules/
 
+# Local screenshots and other generated artifacts
+artifacts/
+
 # Python
 __pycache__/
 *.pyc
