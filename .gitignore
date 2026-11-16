@@ -31,6 +31,10 @@ node_modules/
 # Local screenshots and other generated artifacts
 artifacts/
 
+# Loop verification output and web build output
+.claude/gate.log
+web/dist/
+
 # Python
 __pycache__/
 *.pyc
