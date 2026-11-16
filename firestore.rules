@@ -17,6 +17,11 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // A string list of at most `max` entries (Cloudinary URLs / public IDs).
+    function stringList(value, max) {
+      return value is list && value.size() <= max;
+    }
+
     // A listing is valid when the required fields exist and have the right types.
     function validListing(data) {
       return data.sellerId is string
@@ -28,11 +33,39 @@ service cloud.firestore {
         && data.price >= 0
         && data.contact is string
         && data.contact.size() <= 60
-        // Multiple photos are optional (max 6).
-        && (!('imageUrls' in data) || data.imageUrls.size() <= 6)
+        // At most 5 photos per listing, and at most 5 videos.
+        && (!('imageUrls' in data) || stringList(data.imageUrls, 5))
+        && (!('cloudinaryPublicIds' in data) || stringList(data.cloudinaryPublicIds, 5))
+        && (!('videoUrls' in data) || stringList(data.videoUrls, 5))
+        && (!('cloudinaryVideoPublicIds' in data)
+            || stringList(data.cloudinaryVideoPublicIds, 5))
+        // Listing details: optional, but typed when present.
+        && (!('quantity' in data) || (data.quantity is number && data.quantity >= 1))
+        && (!('condition' in data) || data.condition is string)
+        && (!('status' in data) || data.status is string)
+        && (!('pickupAddress' in data) || data.pickupAddress is string)
+        && (!('updatedAt' in data) || data.updatedAt is number)
+        && (!('expirationDate' in data) || data.expirationDate is string)
+        && (!('expirationTime' in data) || data.expirationTime is string)
         // Pickup coordinates are optional, but must be numbers when present.
         && (!('latitude' in data) || data.latitude == null || data.latitude is number)
         && (!('longitude' in data) || data.longitude == null || data.longitude is number);
+    }
+
+    // Every field the seller's own listing may contain. An update that adds
+    // anything else is a new field the app never writes, so it is refused.
+    function listingFields() {
+      return [
+        'id', 'title', 'description', 'price', 'category', 'town',
+        'sellerId', 'sellerName', 'contact', 'createdAt',
+        'latitude', 'longitude',
+        'imageUrl', 'imageUrls', 'cloudinaryPublicIds',
+        'videoUrls', 'cloudinaryVideoPublicIds',
+        'quantity', 'condition', 'status', 'pickupAddress', 'updatedAt',
+        'expirationDate', 'expirationTime',
+        'isPerishable', 'expiresAt',
+        'views', 'cartAdds', 'viewsByDay'
+      ];
     }
 
     // Moderator: an `admins/{uid}` document exists (written from the Console only).
@@ -57,10 +90,12 @@ service cloud.firestore {
         && request.resource.data.sellerId == request.auth.uid
         && validListing(request.resource.data);
 
-      // A listing cannot be transferred to another seller.
+      // A listing cannot be transferred to another seller, and only the
+      // fields in `listingFields()` may be written.
       allow update: if request.auth != null
         && resource.data.sellerId == request.auth.uid
         && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.keys().hasOnly(listingFields())
         && validListing(request.resource.data);
 
       // Any signed-in user can increment views and cartAdds, but

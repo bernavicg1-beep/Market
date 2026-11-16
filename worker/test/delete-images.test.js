@@ -30,12 +30,22 @@ function jsonResponse(body) {
 }
 
 /** Stub the Google endpoints the Worker talks to, plus the R2 binding. */
-function stub({ admins = [], serviceAccount = true } = {}) {
+function stub({ admins = [], serviceAccount = true, cloudinary = false } = {}) {
   const deleted = [];
   const adminLookups = [];
+  const cloudinaryDeletes = [];
 
   globalThis.fetch = async (url, init = {}) => {
     const href = String(url);
+
+    if (href.includes("api.cloudinary.com")) {
+      const raw = href.split("public_ids=")[1] || "";
+      const ids = decodeURIComponent(raw).split(",").filter(Boolean);
+      cloudinaryDeletes.push(...ids);
+      return jsonResponse({
+        deleted: Object.fromEntries(ids.map((id) => [id, "deleted"])),
+      });
+    }
 
     if (href.includes("identitytoolkit.googleapis.com")) {
       const { idToken } = JSON.parse(init.body);
@@ -74,7 +84,13 @@ function stub({ admins = [], serviceAccount = true } = {}) {
     });
   }
 
-  return { env, deleted, adminLookups };
+  if (cloudinary) {
+    env.CLOUDINARY_CLOUD_NAME = "camiguin-market";
+    env.CLOUDINARY_API_KEY = "123456789012345";
+    env.CLOUDINARY_API_SECRET = "delete-test-secret";
+  }
+
+  return { env, deleted, adminLookups, cloudinaryDeletes };
 }
 
 async function call(env, body, { token = "user-token", method = "POST" } = {}) {
@@ -173,6 +189,45 @@ test("one call deletes at most 30 photos", async () => {
 
   assert.deepEqual(res.body, { deleted: 30, skipped: 0 });
   assert.equal(deleted.length, 30);
+});
+
+test("a seller deletes their own Cloudinary assets by public ID", async () => {
+  const { env, cloudinaryDeletes, deleted } = stub({ cloudinary: true });
+
+  const res = await call(env, {
+    urls: [],
+    publicIds: ["u1/1763000000-abcd1234", "u1/1763000001-efgh5678"],
+  });
+
+  assert.deepEqual(res.body, { deleted: 2, skipped: 0 });
+  assert.deepEqual(cloudinaryDeletes, ["u1/1763000000-abcd1234", "u1/1763000001-efgh5678"]);
+  assert.deepEqual(deleted, []);
+});
+
+test("another seller's public ID is skipped unless the caller is an admin", async () => {
+  const { env, cloudinaryDeletes } = stub({ cloudinary: true });
+
+  const res = await call(env, { urls: [], publicIds: ["u2/theirs"] });
+
+  assert.deepEqual(res.body, { deleted: 0, skipped: 1 });
+  assert.deepEqual(cloudinaryDeletes, []);
+
+  const admin = stub({ cloudinary: true, admins: ["admin1"] });
+  const adminRes = await call(admin.env, { urls: [], publicIds: ["u2/theirs"] }, {
+    token: "admin-token",
+  });
+
+  assert.deepEqual(adminRes.body, { deleted: 1, skipped: 0 });
+  assert.deepEqual(admin.cloudinaryDeletes, ["u2/theirs"]);
+});
+
+test("public IDs are skipped when Cloudinary is not configured", async () => {
+  const { env, cloudinaryDeletes } = stub();
+
+  const res = await call(env, { urls: [], publicIds: ["u1/1763000000-abcd1234"] });
+
+  assert.deepEqual(res.body, { deleted: 0, skipped: 1 });
+  assert.deepEqual(cloudinaryDeletes, []);
 });
 
 test("invalid JSON and the wrong method are refused", async () => {

@@ -17,6 +17,17 @@ crons = ["*/15 * * * *"]
 # The Firebase Web API key (public — it is already in google-services.json).
 # Set it as a secret: wrangler secret put FIREBASE_WEB_API_KEY
 #
+# Cloudinary signed uploads. The preset is signed and stays that way; the
+# app never sees these values:
+#   wrangler secret put CLOUDINARY_CLOUD_NAME
+#   wrangler secret put CLOUDINARY_API_KEY
+#   wrangler secret put CLOUDINARY_API_SECRET   (signing + Admin API deletes)
+#
+# The folder and preset below are the pinned product values; override only if
+# the Cloudinary account moves.
+# CLOUDINARY_FOLDER = "camiguin_market/products"
+# CLOUDINARY_UPLOAD_PRESET = "camiguin_market_products"
+#
 # Optional: set it when you want a custom domain as the base of the links.
 # Without it, the Worker URL is used.
 # PUBLIC_BASE_URL = "https://images.camiguinmarket.example"

@@ -288,22 +288,30 @@ class LeafletBridge(
 ) {
     @JavascriptInterface
     fun onReady() {
-        readyHandler()
+        runCatching { readyHandler() }
     }
 
+    // Everything that arrives from JavaScript is untrusted: a NaN, an
+    // out-of-range coordinate, or an empty marker id is dropped instead of
+    // reaching the map state or throwing on the WebView's thread.
     @JavascriptInterface
     fun onPick(lat: Double, lng: Double) {
-        pickHandler(lat, lng)
+        if (!lat.isFinite() || !lng.isFinite()) return
+        if (lat < -90.0 || lat > 90.0) return
+        if (lng < -180.0 || lng > 180.0) return
+        runCatching { pickHandler(lat, lng) }
     }
 
     @JavascriptInterface
-    fun onMarker(id: String) {
-        markerHandler(id)
+    fun onMarker(id: String?) {
+        val markerId = id?.trim().orEmpty()
+        if (markerId.isEmpty() || markerId.length > 128) return
+        runCatching { markerHandler(markerId) }
     }
 
     @JavascriptInterface
     fun onMyLocation() {
-        myLocationHandler()
+        runCatching { myLocationHandler() }
     }
 }
 

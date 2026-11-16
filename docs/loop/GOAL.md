@@ -37,11 +37,11 @@ a green gate is false completeness.
 | Thing | State |
 | --- | --- |
 | `gradle assembleDebug` | Green (JDK 21, Gradle 9.6.0, SDK 37.0) |
-| `worker` tests | Green, 17/17 |
-| Firestore rules tests | Green, 99/99 (brief says 90; the script actually has 99) |
-| `web` Vite build | Not yet run in this VM |
-| Media storage | **Cloudflare R2 today** via `worker/index.js` `/upload` — must become Cloudinary |
-| App version | 0.41 |
+| `worker` tests | Green, 32/32 |
+| Firestore rules tests | Green, 110/110 (brief said 90; the suite grew as fields were added) |
+| `web` Vite build | Green in this VM |
+| Media storage | **Cloudinary** signed uploads via `/cloudinary-sign`; Admin API deletes in the purge |
+| App version | 0.8 (`versionCode` 42) |
 | Map | `LeafletMap.kt` + `assets/` (WebView bridge present, unverified on device) |
 | Account deletion | In-app, handles `FirebaseAuthRecentLoginRequiredException` |
 | `docs/account-deletion.html` | Present, still has `YOUR_SUPPORT_EMAIL_HERE` |
@@ -106,6 +106,10 @@ weakened or deleted to make room.
 non-perishable `expiresAt = 0` case.
 
 ### W5 — Map, OSRM, Nominatim on the WebView bridge
+
+> **Finding from the loop run:** the in-app map is native osmdroid, and
+> `LeafletBridge` / `leafletConfig()` are dead code. The callbacks were hardened
+> regardless; see [HANDOVER.md](HANDOVER.md).
 
 - `onPick` / `onMarker` callbacks hardened: validate numeric ranges, ignore
   malformed payloads, never crash the WebView.

@@ -1,9 +1,10 @@
 /**
- * Tests for the scheduled purge: expired perishable listings are deleted from
- * Firestore and their photos are removed from R2.
+ * Tests for the scheduled purge: expired perishable listings are hidden, their
+ * media is removed (Cloudinary by public ID, R2 for older photos), and only
+ * then is the Firestore document deleted.
  *
- * Everything runs against a stubbed Firestore/R2, so no credentials and no
- * emulator are needed. Run with: npm test  (inside `worker/`)
+ * Everything runs against a stubbed Firestore/R2/Cloudinary, so no credentials
+ * and no emulator are needed. Run with: npm test  (inside `worker/`)
  */
 
 import assert from "node:assert/strict";
@@ -26,12 +27,27 @@ function jsonResponse(body) {
 }
 
 /** One `listings` document as the REST API returns it. */
-function firestoreDoc({ id, isPerishable = true, expiresAt, photos = [] }) {
+function firestoreDoc({
+  id,
+  isPerishable = true,
+  expiresAt,
+  photos = [],
+  cloudinaryPublicIds = [],
+  cloudinaryVideoPublicIds = [],
+  cleanupAttempts = 0,
+}) {
   const fields = {
     isPerishable: { booleanValue: isPerishable },
     expiresAt: { integerValue: String(expiresAt) },
     imageUrl: { stringValue: photos[0] || "" },
     imageUrls: { arrayValue: { values: photos.map((url) => ({ stringValue: url })) } },
+    cloudinaryPublicIds: {
+      arrayValue: { values: cloudinaryPublicIds.map((id) => ({ stringValue: id })) },
+    },
+    cloudinaryVideoPublicIds: {
+      arrayValue: { values: cloudinaryVideoPublicIds.map((id) => ({ stringValue: id })) },
+    },
+    cleanupAttempts: { integerValue: String(cleanupAttempts) },
   };
   return {
     document: {
@@ -42,17 +58,28 @@ function firestoreDoc({ id, isPerishable = true, expiresAt, photos = [] }) {
 }
 
 const now = Date.now();
-const expired = (id, photos = []) =>
-  firestoreDoc({ id, expiresAt: now - 60_000, photos });
+const expired = (id, photos = [], cloudinaryPublicIds = []) =>
+  firestoreDoc({ id, expiresAt: now - 60_000, photos, cloudinaryPublicIds });
 
 /**
- * Stub the Google endpoints. `pages` is what each `runQuery` call returns;
- * `failDeletes` lists document ids whose DELETE answers 500; `failPhotoKeys`
- * lists R2 keys whose delete throws.
+ * Stub the Google + Cloudinary endpoints. `pages` is what each `runQuery`
+ * call returns; `failDeletes` lists document ids whose DELETE answers 500;
+ * `failPhotoKeys` lists R2 keys whose delete throws; `failCloudinary` lists
+ * public IDs Cloudinary refuses to delete.
  */
-function stub({ pages = [], failDeletes = [], failPhotoKeys = [], serviceAccount = true } = {}) {
+function stub({
+  pages = [],
+  failDeletes = [],
+  failPhotoKeys = [],
+  failCloudinary = [],
+  serviceAccount = true,
+  cloudinary = false,
+} = {}) {
   const deletedDocs = [];
   const deletedPhotos = [];
+  const patches = [];
+  const cloudinaryDeletes = [];
+  const events = [];
   const calls = { runQuery: 0, queries: [] };
 
   globalThis.fetch = async (url, init = {}) => {
@@ -70,10 +97,31 @@ function stub({ pages = [], failDeletes = [], failPhotoKeys = [], serviceAccount
       return jsonResponse(page);
     }
 
+    if (init.method === "PATCH" && href.includes("/documents/listings/")) {
+      const id = href.split("/documents/listings/")[1].split("?")[0];
+      patches.push({ id, fields: JSON.parse(init.body).fields, mask: href.split("?")[1] });
+      events.push(`patch:${id}`);
+      return jsonResponse({ name: `listings/${id}` });
+    }
+
     if (init.method === "DELETE" && href.includes("/documents/listings/")) {
       const id = href.split("/documents/listings/")[1];
       deletedDocs.push(id);
+      events.push(`delete:${id}`);
       return new Response("", { status: failDeletes.includes(id) ? 500 : 200 });
+    }
+
+    if (href.includes("api.cloudinary.com")) {
+      const raw = href.split("public_ids=")[1] || "";
+      const ids = decodeURIComponent(raw).split(",").filter(Boolean);
+      cloudinaryDeletes.push(...ids);
+      for (const id of ids) events.push(`cloud:${id}`);
+      if (ids.some((id) => failCloudinary.includes(id))) {
+        return new Response('{"error":{"message":"delete failed"}}', { status: 400 });
+      }
+      return jsonResponse({
+        deleted: Object.fromEntries(ids.map((id) => [id, "deleted"])),
+      });
     }
 
     throw new Error(`unexpected fetch: ${href}`);
@@ -96,7 +144,13 @@ function stub({ pages = [], failDeletes = [], failPhotoKeys = [], serviceAccount
     });
   }
 
-  return { env, deletedDocs, deletedPhotos, calls };
+  if (cloudinary) {
+    env.CLOUDINARY_CLOUD_NAME = "camiguin-market";
+    env.CLOUDINARY_API_KEY = "123456789012345";
+    env.CLOUDINARY_API_SECRET = "purge-test-secret";
+  }
+
+  return { env, deletedDocs, deletedPhotos, patches, cloudinaryDeletes, events, calls };
 }
 
 /** Run the cron handler and wait for the work it scheduled. */
@@ -111,12 +165,15 @@ function runScheduled(env) {
 }
 
 test("without the service account nothing is touched", async () => {
-  const { env, deletedDocs, deletedPhotos, calls } = stub({ serviceAccount: false });
+  const { env, deletedDocs, deletedPhotos, patches, calls } = stub({
+    serviceAccount: false,
+  });
 
   await runScheduled(env);
 
   assert.deepEqual(deletedDocs, []);
   assert.deepEqual(deletedPhotos, []);
+  assert.deepEqual(patches, []);
   assert.equal(calls.runQuery, 0);
 });
 
@@ -162,6 +219,20 @@ test("the query only selects a past expiration range", async () => {
   assert.ok(Number(filters[1].fieldFilter.value.integerValue) >= now);
 });
 
+test("a listing without an expiration is never selected or deleted", async () => {
+  const { env, deletedDocs, patches, calls } = stub({
+    pages: [
+      [firestoreDoc({ id: "durable", isPerishable: false, expiresAt: 0 })],
+    ],
+  });
+
+  await runScheduled(env);
+
+  assert.equal(calls.runQuery, 1);
+  assert.deepEqual(deletedDocs, []);
+  assert.deepEqual(patches, []);
+});
+
 test("photo URLs are deduplicated and only listing_images keys are removed", async () => {
   const { env, deletedPhotos } = stub({
     pages: [
@@ -185,7 +256,75 @@ test("photo URLs are deduplicated and only listing_images keys are removed", asy
   assert.deepEqual(deletedPhotos, ["listing_images/u1/same.jpg"]);
 });
 
-test("a failed document delete keeps that listing's photos for the next run", async () => {
+test("Cloudinary assets are deleted by public ID before the document", async () => {
+  const { env, deletedDocs, cloudinaryDeletes, events, patches } = stub({
+    cloudinary: true,
+    pages: [
+      [
+        expired("food", [], ["u1/food-photo-1", "u1/food-photo-2"]),
+      ],
+    ],
+  });
+
+  await runScheduled(env);
+
+  assert.deepEqual(cloudinaryDeletes, ["u1/food-photo-1", "u1/food-photo-2"]);
+  assert.deepEqual(deletedDocs, ["food"]);
+
+  // The document is hidden first, then its media goes, then the document goes.
+  const hide = events.indexOf("patch:food");
+  const media = events.indexOf("cloud:u1/food-photo-1");
+  const docDelete = events.indexOf("delete:food");
+  assert.ok(hide >= 0 && media > hide && docDelete > media);
+
+  assert.equal(
+    patches[0].fields.cleanupState.stringValue,
+    "purging",
+    "the listing is hidden while its media is being removed",
+  );
+});
+
+test("a failed Cloudinary delete keeps the document and records the failure", async () => {
+  const { env, deletedDocs, patches } = stub({
+    cloudinary: true,
+    pages: [[expired("stuck", [], ["u1/stuck-1"])]],
+    failCloudinary: ["u1/stuck-1"],
+  });
+
+  await runScheduled(env);
+
+  // The document survives so the next run can retry the media.
+  assert.deepEqual(deletedDocs, []);
+  const failed = patches.find(
+    (p) => p.fields.cleanupState?.stringValue === "media_failed",
+  );
+  assert.ok(failed, "cleanupState is set to media_failed");
+  assert.equal(failed.fields.cleanupAttempts.integerValue, "1");
+});
+
+test("a failed retry increments the attempt counter", async () => {
+  const { env, patches } = stub({
+    cloudinary: true,
+    pages: [
+      [firestoreDoc({
+        id: "again",
+        expiresAt: now - 60_000,
+        cloudinaryPublicIds: ["u1/again-1"],
+        cleanupAttempts: 2,
+      })],
+    ],
+    failCloudinary: ["u1/again-1"],
+  });
+
+  await runScheduled(env);
+
+  const failed = patches.find(
+    (p) => p.fields.cleanupState?.stringValue === "media_failed",
+  );
+  assert.equal(failed.fields.cleanupAttempts.integerValue, "3");
+});
+
+test("a failed document delete happens only after its media is gone", async () => {
   const { env, deletedDocs, deletedPhotos } = stub({
     pages: [
       [
@@ -198,13 +337,17 @@ test("a failed document delete keeps that listing's photos for the next run", as
 
   await runScheduled(env);
 
-  // Both were attempted, only the successful one lost its photo.
+  // Both were attempted, and both lost their media: media is never kept for a
+  // listing whose document delete failed.
   assert.deepEqual(deletedDocs.sort(), ["gone", "stuck"]);
-  assert.deepEqual(deletedPhotos, ["listing_images/u2/gone.jpg"]);
+  assert.deepEqual(deletedPhotos.sort(), [
+    "listing_images/u1/stuck.jpg",
+    "listing_images/u2/gone.jpg",
+  ]);
 });
 
-test("a failing R2 delete is counted but does not stop the run", async () => {
-  const { env, deletedDocs, deletedPhotos } = stub({
+test("a failing R2 delete keeps that listing for the next run", async () => {
+  const { env, deletedDocs, deletedPhotos, patches } = stub({
     pages: [
       [expired("a", [`${PHOTO}/listing_images/u1/a.jpg`, `${PHOTO}/listing_images/u1/b.jpg`])],
     ],
@@ -213,8 +356,12 @@ test("a failing R2 delete is counted but does not stop the run", async () => {
 
   await runScheduled(env);
 
-  assert.deepEqual(deletedDocs, ["a"]);
+  assert.deepEqual(deletedDocs, []);
   assert.equal(deletedPhotos.length, 2);
+  assert.ok(
+    patches.some((p) => p.fields.cleanupState?.stringValue === "media_failed"),
+    "the partial failure is recorded so it is retried",
+  );
 });
 
 test("nothing deletable means one query and no deletes", async () => {

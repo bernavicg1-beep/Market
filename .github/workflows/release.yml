@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - uses: android-actions/setup-android@v4
         with:
@@ -29,7 +29,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: 9.9.1
+          gradle-version: 9.6.0
 
       # A release signed with anything but the project key cannot be installed
       # as an update, so refuse to publish one.

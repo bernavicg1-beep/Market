@@ -327,15 +327,16 @@ def app_listing_with_photos(seller, photos):
 
 
 PHOTO_BASE = "https://worker.example/i/listing_images"
-photos = [f"{PHOTO_BASE}/u2/p{i}.jpg" for i in range(6)]
+photos = [f"{PHOTO_BASE}/u2/p{i}.jpg" for i in range(5)]
 
 # Photo cleanup in the app runs only after the document delete succeeds, so the
 # rules must: (a) accept a listing that carries photos, and (b) allow the admin
 # (never a normal user) to delete someone else's listing.
-check("photos: seller posts a listing with 6 photos", "POST", "/listings", 200,
+# A listing may carry at most 5 photos (the product limit).
+check("photos: seller posts a listing with 5 photos", "POST", "/listings", 200,
       uid="u2", body=app_listing_with_photos("u2", photos), doc_id="photodoc1")
-check("photos: seven photos are rejected", "POST", "/listings", 403, uid="u2",
-      body=app_listing_with_photos("u2", photos + [f"{PHOTO_BASE}/u2/p6.jpg"]),
+check("photos: six photos are rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_photos("u2", photos + [f"{PHOTO_BASE}/u2/p5.jpg"]),
       doc_id="photodoc2")
 check("photos: another user can open the listing", "GET", "/listings/photodoc1", 200,
       uid="u3")
@@ -343,6 +344,88 @@ check("photos: non-admin cannot delete the listing", "DELETE", "/listings/photod
       uid="u3")
 check("photos: admin can delete the listing (photo cleanup runs after)", "DELETE",
       "/listings/photodoc1", 200, uid="admin1")
+
+
+# --- Cloudinary media and listing details (0.8 fields) -----------------------
+def app_listing_with_details(seller, **extra):
+    """The app's `Listing` with the 0.8 fields attached."""
+    doc = app_listing(seller)
+    doc["fields"].update(extra)
+    return doc
+
+
+cloud_photos = [f"https://res.cloudinary.com/demo/image/upload/camiguin_market/products/u2/p{i}"
+                for i in range(5)]
+cloud_ids = [f"u2/176300000{i}-abcd1234" for i in range(5)]
+
+check("media: 5 Cloudinary photos and their public IDs are accepted", "POST",
+      "/listings", 200, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          imageUrl={"stringValue": cloud_photos[0]},
+          imageUrls={"arrayValue": {"values": [{"stringValue": u} for u in cloud_photos]}},
+          cloudinaryPublicIds={"arrayValue": {"values": [{"stringValue": i} for i in cloud_ids]}},
+      ),
+      doc_id="mediadoc1")
+check("media: a sixth Cloudinary photo is rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          imageUrls={"arrayValue": {"values": [{"stringValue": u} for u in cloud_photos + cloud_photos[:1]]}},
+      ),
+      doc_id="mediadoc2")
+check("media: a sixth public ID is rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          cloudinaryPublicIds={"arrayValue": {"values": [{"stringValue": i} for i in cloud_ids + cloud_ids[:1]]}},
+      ),
+      doc_id="mediadoc3")
+check("media: video URLs and public IDs are accepted", "POST", "/listings", 200, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          videoUrls={"arrayValue": {"values": [
+              {"stringValue": "https://res.cloudinary.com/demo/video/upload/camiguin_market/products/u2/v1.mp4"}]}},
+          cloudinaryVideoPublicIds={"arrayValue": {"values": [{"stringValue": "u2/v1"}]}},
+      ),
+      doc_id="mediadoc4")
+
+check("details: quantity, condition, status, address and dates are accepted", "POST",
+      "/listings", 200, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          quantity={"integerValue": "3"},
+          condition={"stringValue": "Brand new"},
+          status={"stringValue": "active"},
+          pickupAddress={"stringValue": "Mambajao public market"},
+          updatedAt={"integerValue": "1763000000001"},
+          expirationDate={"stringValue": "2026-11-20"},
+          expirationTime={"stringValue": "18:00"},
+      ),
+      doc_id="detaildoc1")
+check("details: the owner can update them", "PATCH", "/listings/detaildoc1", 200, uid="u2",
+      body=app_listing_with_details(
+          "u2",
+          quantity={"integerValue": "4"},
+          condition={"stringValue": "Used - like new"},
+          status={"stringValue": "active"},
+          pickupAddress={"stringValue": "Mambajao public market"},
+          updatedAt={"integerValue": "1763000000002"},
+          expirationDate={"stringValue": "2026-11-21"},
+          expirationTime={"stringValue": "09:00"},
+      ))
+check("details: quantity below 1 is rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_details("u2", quantity={"integerValue": "0"}),
+      doc_id="detaildoc2")
+check("details: a non-numeric quantity is rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_details("u2", quantity={"stringValue": "daghan"}),
+      doc_id="detaildoc3")
+check("details: a non-string status is rejected", "POST", "/listings", 403, uid="u2",
+      body=app_listing_with_details("u2", status={"integerValue": "1"}),
+      doc_id="detaildoc4")
+check("details: an unknown field on update is rejected", "PATCH", "/listings/detaildoc1",
+      403, uid="u2",
+      body=app_listing_with_details("u2", featured={"booleanValue": True}))
+check("details: someone else still cannot update", "PATCH", "/listings/detaildoc1", 403,
+      uid="u3", body=app_listing_with_details("u2", quantity={"integerValue": "9"}))
 
 # The Worker decides "admin" by reading `admins/{uid}` with the service account;
 # these checks pin what that lookup can see for each kind of caller.

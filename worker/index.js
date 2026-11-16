@@ -1,19 +1,38 @@
 /**
- * Camiguin Market — image upload + push Worker (Cloudflare R2 + FCM).
+ * Camiguin Market — media upload + push Worker (Cloudinary + FCM).
  *
- * POST /upload
+ * POST /cloudinary-sign
+ *   Header: Authorization: Bearer <Firebase ID token>
+ *   Body:   { "resourceType": "image" | "video" }  (optional, default image)
+ *   Response: { cloudName, apiKey, timestamp, signature, folder,
+ *               uploadPreset, publicId, resourceType, uploadUrl }
+ *
+ * The app uploads the bytes straight to Cloudinary with the signed params.
+ * The API secret never leaves this Worker.
+ *
+ * POST /upload (legacy R2 path, kept until every 0.7 client is gone)
  *   Header: Authorization: Bearer <Firebase ID token>
  *   Header: Content-Type: image/jpeg | image/png | image/webp
  *   Body:   photo bytes (max 5 MB)
  *   Response: { "url": "https://<worker>/i/listing_images/<uid>/<file>.jpg" }
  *
  * GET /i/<key>
- *   Return the photo from R2 (public read, long cache).
+ *   Return a legacy R2 photo (public read, long cache).
  *
- * Why verification lives here: R2 credentials never reach the app.
- * The Worker verifies the Firebase ID token and builds the R2 key from the
- * token's `uid`, so a user can only write inside their own folder.
+ * Why verification lives here: Cloudinary/R2 credentials never reach the app.
+ * The Worker verifies the Firebase ID token and derives the public ID prefix
+ * from the token's `uid`, so a user can only write inside their own folder.
  */
+
+// ---------------------------------------------------------------------------
+// Cloudinary
+// ---------------------------------------------------------------------------
+
+// Both are pinned by the product spec: the preset stays signed, the folder
+// stays fixed, and `ml_default` is never touched.
+const CLOUDINARY_FOLDER = "camiguin_market/products";
+const CLOUDINARY_PRESET = "camiguin_market_products";
+const CLOUDINARY_RESOURCE_TYPES = new Set(["image", "video"]);
 
 const MAX_BYTES = 5 * 1024 * 1024;
 const ALLOWED_TYPES = new Map([
@@ -64,6 +83,108 @@ function publicBase(request, env) {
   return `${url.protocol}//${url.host}`;
 }
 
+/** SHA-1 hex, the digest Cloudinary signs upload params with. */
+async function sha1Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Cloudinary credentials, or null when they are not configured.
+ * A missing secret must fail closed: an unsigned upload would let anyone
+ * write into the account.
+ */
+function cloudinaryConfig(env) {
+  const cloudName = (env.CLOUDINARY_CLOUD_NAME || "").trim();
+  const apiKey = (env.CLOUDINARY_API_KEY || "").trim();
+  const apiSecret = (env.CLOUDINARY_API_SECRET || "").trim();
+  if (!cloudName || !apiKey || !apiSecret) return null;
+  return {
+    cloudName,
+    apiKey,
+    apiSecret,
+    folder: env.CLOUDINARY_FOLDER || CLOUDINARY_FOLDER,
+    preset: env.CLOUDINARY_UPLOAD_PRESET || CLOUDINARY_PRESET,
+  };
+}
+
+/** Cloudinary signature: SHA-1 of the sorted params plus the API secret. */
+async function cloudinarySignature(secret, params) {
+  const toSign = Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join("&");
+  return sha1Hex(toSign + secret);
+}
+
+/**
+ * POST /cloudinary-sign
+ *   Header: Authorization: Bearer <Firebase ID token>
+ *   Body:   { "resourceType": "image" | "video" }
+ *
+ * Returns the parameters the app sends to Cloudinary. Only the signature is
+ * derived from the secret; the secret itself is never echoed back.
+ *
+ * `overwrite` is signed as false and every `public_id` is unique, so an upload
+ * can never replace someone else's asset.
+ */
+async function handleCloudinarySign(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!token) return json({ error: "unauthorized" }, 401);
+
+  const uid = await verifyIdToken(token, env);
+  if (!uid) return json({ error: "unauthorized" }, 401);
+
+  const config = cloudinaryConfig(env);
+  if (!config) return json({ error: "media_not_configured" }, 503);
+
+  let body = {};
+  const contentType = (request.headers.get("Content-Type") || "").toLowerCase();
+  if (contentType.includes("application/json")) {
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad_json" }, 400);
+    }
+  }
+
+  const resourceType = String(body.resourceType || "image");
+  if (!CLOUDINARY_RESOURCE_TYPES.has(resourceType)) {
+    return json({ error: "unsupported_resource_type" }, 400);
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  // The uid prefix is what makes deletion authorizeable later: a public ID
+  // outside `camiguin_market/products/<uid>/` is never accepted.
+  const publicId = `${uid}/${timestamp}-${crypto.randomUUID().slice(0, 8)}`;
+  const params = {
+    folder: config.folder,
+    overwrite: "false",
+    public_id: publicId,
+    timestamp: String(timestamp),
+    upload_preset: config.preset,
+  };
+
+  return json(
+    {
+      cloudName: config.cloudName,
+      apiKey: config.apiKey,
+      timestamp,
+      signature: await cloudinarySignature(config.apiSecret, params),
+      folder: config.folder,
+      uploadPreset: config.preset,
+      publicId,
+      overwrite: false,
+      resourceType,
+      uploadUrl: `https://api.cloudinary.com/v1_1/${config.cloudName}/${resourceType}/upload`,
+    },
+    200,
+  );
+}
+
 async function handleUpload(request, env) {
   const auth = request.headers.get("Authorization") || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
@@ -93,14 +214,51 @@ async function handleUpload(request, env) {
 }
 
 /**
+ * Delete Cloudinary assets by public ID through the Admin API.
+ *
+ * Server-side only: it authenticates with the API key/secret pair, so this
+ * must never be reachable from the app with someone else's secret.
+ * Returns `{ ok, deleted }`; `ok` is false when Cloudinary answered with an
+ * error, which the caller treats as "keep the document and retry later".
+ */
+async function destroyCloudinaryAssets(env, publicIds, resourceType = "image") {
+  const ids = (publicIds || []).filter(Boolean);
+  if (ids.length === 0) return { ok: true, deleted: 0 };
+
+  const config = cloudinaryConfig(env);
+  if (!config) return { ok: false, deleted: 0 };
+
+  const auth = btoa(`${config.apiKey}:${config.apiSecret}`);
+  const url =
+    `https://api.cloudinary.com/v1_1/${config.cloudName}` +
+    `/resources/${resourceType}/upload?public_ids=` +
+    encodeURIComponent(ids.join(","));
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Basic ${auth}` },
+    });
+    if (!res.ok) return { ok: false, deleted: 0 };
+    const data = await res.json().catch(() => ({}));
+    const deleted = data && data.deleted ? Object.keys(data.deleted).length : ids.length;
+    return { ok: true, deleted };
+  } catch {
+    return { ok: false, deleted: 0 };
+  }
+}
+
+/**
  * POST /delete-images
  *   Header: Authorization: Bearer <Firebase ID token>
- *   Body:   { "urls": ["https://<worker>/i/listing_images/<uid>/<file>.jpg", ...] }
+ *   Body:   { "urls": ["https://<worker>/i/listing_images/<uid>/<file>.jpg", ...],
+ *             "publicIds": ["<uid>/<id>", ...] }
  *   Response: { "deleted": n, "skipped": n }
  *
  * Used by the app when a seller deletes a listing or replaces its photos.
  * Only keys inside `listing_images/<uid>/` are removed, so a user cannot
- * delete another seller's photos; unknown URLs count as skipped.
+ * delete another seller's photos; unknown URLs count as skipped. Cloudinary
+ * public IDs must start with the caller's `uid/`, the same rule.
  *
  * An admin (`admins/{uid}` exists) may also delete photos in any
  * `listing_images/` folder, which is how moderator removals clean up after a
@@ -153,6 +311,41 @@ async function handleDeleteImages(request, env) {
       deleted += 1;
     } catch {
       skipped += 1;
+    }
+  }
+
+  // Cloudinary assets. A public ID belongs to the caller when it starts with
+  // their uid; anything else needs the admin check, exactly like R2 keys.
+  const publicIds = Array.isArray(body.publicIds)
+    ? body.publicIds.slice(0, 30).map(String)
+    : [];
+  const mine = [];
+  const foreign = [];
+  // Cloudinary public IDs are `<uid>/<unique>`, not R2's
+  // `listing_images/<uid>/...`, so the ownership prefix is the uid itself.
+  const publicIdPrefix = `${uid}/`;
+  for (const publicId of publicIds) {
+    const id = publicId.replace(/^\/+/, "");
+    if (!id) {
+      skipped += 1;
+      continue;
+    }
+    if (id.startsWith(publicIdPrefix)) mine.push(id);
+    else foreign.push(id);
+  }
+
+  if (foreign.length > 0) {
+    if (await callerIsAdmin()) mine.push(...foreign);
+    else skipped += foreign.length;
+  }
+
+  if (mine.length > 0) {
+    if (!cloudinaryConfig(env)) {
+      skipped += mine.length;
+    } else {
+      const result = await destroyCloudinaryAssets(env, mine, "image");
+      if (result.ok) deleted += result.deleted;
+      else skipped += mine.length;
     }
   }
 
@@ -562,9 +755,29 @@ async function queryExpiredListings(sa, token, now, limit) {
       expiresAt: Number(fieldValue(fields.expiresAt) || 0),
       imageUrl: fieldValue(fields.imageUrl) || "",
       imageUrls: fieldValue(fields.imageUrls) || [],
+      // Cloudinary assets must be removed by public ID.
+      cloudinaryPublicIds: fieldValue(fields.cloudinaryPublicIds) || [],
+      cloudinaryVideoPublicIds: fieldValue(fields.cloudinaryVideoPublicIds) || [],
+      cleanupAttempts: Number(fieldValue(fields.cleanupAttempts) || 0),
     });
   }
   return out;
+}
+
+/** PATCH a listing's cleanup fields with the service account. */
+async function patchListing(sa, token, id, fields, mask) {
+  const params = mask
+    .map((field) => `updateMask.fieldPaths=${encodeURIComponent(field)}`)
+    .join("&");
+  const res = await fetch(`${docUrl(sa, `listings/${id}`)}?${params}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields }),
+  });
+  return res.ok;
 }
 
 async function deleteListing(sa, token, id) {
@@ -625,6 +838,8 @@ async function purgeExpiredListings(env) {
 
   let deleted = 0;
   let failures = 0;
+  let hidden = 0;
+  let mediaFailures = 0;
   let photosDeleted = 0;
   let photoFailures = 0;
 
@@ -634,25 +849,81 @@ async function purgeExpiredListings(env) {
       .filter((doc) => doc.isPerishable && doc.expiresAt > 0 && doc.expiresAt <= now);
     if (expired.length === 0) break;
 
-    const results = await Promise.all(
-      expired.map((doc) => deleteListing(sa, access, doc.id)),
+    // 1. Hide first: a listing must never be visible while its media is being
+    //    removed, and a later failure leaves a hidden, retryable document
+    //    instead of a live listing with broken photos.
+    await Promise.all(
+      expired.map((doc) =>
+        patchListing(
+          sa, access, doc.id,
+          {
+            status: { stringValue: "expired" },
+            cleanupState: { stringValue: "purging" },
+          },
+          ["status", "cleanupState"],
+        ),
+      ),
     );
-    const removedDocs = expired.filter((_, index) => results[index]);
+    hidden += expired.length;
+
+    // 2. Media next — Cloudinary by public ID, R2 for older photos. The
+    //    document is deleted only after its media is really gone, so losing
+    //    the document can never strand assets nobody can find again.
+    const mediaOk = new Map();
+    for (const doc of expired) {
+      const legacy = await deletePhotos(env, [doc]);
+      photosDeleted += legacy.photosDeleted;
+      photoFailures += legacy.photoFailures;
+
+      const images = await destroyCloudinaryAssets(
+        env, doc.cloudinaryPublicIds, "image",
+      );
+      const videos = await destroyCloudinaryAssets(
+        env, doc.cloudinaryVideoPublicIds, "video",
+      );
+      photosDeleted += images.deleted + videos.deleted;
+
+      mediaOk.set(doc.id, legacy.photoFailures === 0 && images.ok && videos.ok);
+    }
+
+    // 3. A listing whose media could not be removed stays, marked so the next
+    //    run retries it and so the failure is visible.
+    const blocked = expired.filter((doc) => !mediaOk.get(doc.id));
+    mediaFailures += blocked.length;
+    await Promise.all(
+      blocked.map((doc) =>
+        patchListing(
+          sa, access, doc.id,
+          {
+            cleanupState: { stringValue: "media_failed" },
+            cleanupAttempts: { integerValue: String(doc.cleanupAttempts + 1) },
+          },
+          ["cleanupState", "cleanupAttempts"],
+        ),
+      ),
+    );
+
+    const ready = expired.filter((doc) => mediaOk.get(doc.id));
+    const results = await Promise.all(
+      ready.map((doc) => deleteListing(sa, access, doc.id)),
+    );
+    const removedDocs = ready.filter((_, index) => results[index]);
     deleted += removedDocs.length;
-    failures += expired.length - removedDocs.length;
+    failures += ready.length - removedDocs.length;
 
-    // Drop the photos of the listings that are really gone, so R2 does not
-    // keep orphaned images after the document is deleted.
-    const photos = await deletePhotos(env, removedDocs);
-    photosDeleted += photos.photosDeleted;
-    photoFailures += photos.photoFailures;
-
-    // Stop when nothing could be removed, so a failure cannot spin the loop.
+    // Stop when nothing could be purged, so a failure cannot spin the loop.
     if (removedDocs.length === 0) break;
     if (expired.length < PURGE_BATCH) break;
   }
 
-  return { deleted, failures, photosDeleted, photoFailures };
+  return {
+    deleted,
+    failures,
+    hidden,
+    mediaFailures,
+    photosDeleted,
+    photoFailures,
+  };
 }
 
 async function handleTelegramLogin(request, env, url) {
@@ -747,10 +1018,16 @@ export default {
     if (url.pathname === "/health") {
       return json({
         ok: true,
-              bucket: Boolean(env.IMAGES),
-      push: Boolean(env.FIREBASE_SERVICE_ACCOUNT),
-      telegram: Boolean(env.TELEGRAM_BOT_TOKEN),
+        bucket: Boolean(env.IMAGES),
+        cloudinary: Boolean(cloudinaryConfig(env)),
+        push: Boolean(env.FIREBASE_SERVICE_ACCOUNT),
+        telegram: Boolean(env.TELEGRAM_BOT_TOKEN),
       });
+    }
+
+    if (url.pathname === "/cloudinary-sign") {
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+      return handleCloudinarySign(request, env);
     }
 
     if (url.pathname === "/push") {

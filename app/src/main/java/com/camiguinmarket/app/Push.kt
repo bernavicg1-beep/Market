@@ -32,11 +32,18 @@ private const val MAX_DELETE_URLS = 30
  * Call it after the Firestore write succeeds, so a failed save never leaves a
  * listing pointing at photos that were already removed.
  */
-fun deleteListingImages(urls: List<String>, onDone: () -> Unit = {}) {
+fun deleteListingImages(
+    urls: List<String>,
+    publicIds: List<String> = emptyList(),
+    onDone: () -> Unit = {}
+) {
     val base = BuildConfig.R2_UPLOAD_URL.trim().trimEnd('/')
     val user = FirebaseAuth.getInstance().currentUser
     val unique = urls.filter { it.isNotBlank() }.distinct()
-    if (base.isBlank() || unique.isEmpty() || user == null) {
+    // Cloudinary assets are deleted by public ID; the URL is only a fallback
+    // for photos uploaded before 0.8.
+    val ids = publicIds.filter { it.isNotBlank() }.distinct()
+    if (base.isBlank() || (unique.isEmpty() && ids.isEmpty()) || user == null) {
         onDone()
         return
     }
@@ -49,9 +56,17 @@ fun deleteListingImages(urls: List<String>, onDone: () -> Unit = {}) {
         }
         Thread {
             try {
-                unique.chunked(MAX_DELETE_URLS).forEach { chunk ->
+                // Legacy R2 keys are removed by URL; Cloudinary assets by
+                // public ID. Both are chunked to the Worker's per-call limit.
+                val batches =
+                    unique.chunked(MAX_DELETE_URLS).map { chunk -> chunk to emptyList<String>() } +
+                        ids.chunked(MAX_DELETE_URLS).map { chunk -> emptyList<String>() to chunk }
+
+                batches.forEach { (chunkUrls, chunkIds) ->
                     runCatching {
-                        val body = JSONObject().put("urls", JSONArray(chunk))
+                        val body = JSONObject()
+                            .put("urls", JSONArray(chunkUrls))
+                            .put("publicIds", JSONArray(chunkIds))
                         val conn = URL("$base/delete-images").openConnection() as HttpURLConnection
                         conn.requestMethod = "POST"
                         conn.connectTimeout = 10_000

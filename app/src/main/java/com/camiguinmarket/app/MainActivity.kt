@@ -99,6 +99,23 @@ data class Listing(
     val imageUrl: String = "",
     // All photos (`imageUrl` is the first one, for older cards).
     val imageUrls: List<String> = emptyList(),
+    // Cloudinary public IDs of the same photos, in the same order. They are
+    // what the Worker needs to delete the assets when the listing goes away;
+    // the URL alone cannot be used for a signed Admin API delete.
+    val cloudinaryPublicIds: List<String> = emptyList(),
+    // Videos and their Cloudinary public IDs (same rules as the photos).
+    val videoUrls: List<String> = emptyList(),
+    val cloudinaryVideoPublicIds: List<String> = emptyList(),
+    // Listing details.
+    val quantity: Long = 1L,
+    val condition: String = "",
+    // "active" | "expired" | "sold".
+    val status: String = "active",
+    val pickupAddress: String = "",
+    val updatedAt: Long = 0L,
+    // Readable halves of `expiresAt`, for lists and notifications.
+    val expirationDate: String = "",
+    val expirationTime: String = "",
     // Number of detail opens (incremented by any signed-in user).
     val views: Long = 0L,
     // Number of cart adds.
@@ -926,9 +943,10 @@ fun MarketScreen(
                                     } else {
                                         scope.launch {
                                             try {
-                                                val url = withContext(Dispatchers.IO) {
-                                                    uploadListingImage(context, BuildConfig.R2_UPLOAD_URL, token, uri)
+                                                val media = withContext(Dispatchers.IO) {
+                                                    uploadListingMedia(context, BuildConfig.R2_UPLOAD_URL, token, uri)
                                                 }
+                                                val url = media.url
                                                 u.updateProfile(
                                                     com.google.firebase.auth.UserProfileChangeRequest.Builder()
                                                         .setPhotoUri(android.net.Uri.parse(url)).build()
@@ -1395,10 +1413,11 @@ fun PostDialog(
     var uploading by remember { mutableStateOf(false) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
-    // Multiple photos can be picked (max 6).
+    // Multiple photos can be picked (max 5).
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) {
-            imageUris = uris.take(6)
+            // The product limit is 5 photos; the rules enforce it too.
+            imageUris = uris.take(5)
             uploadError = null
         }
     }
@@ -1412,12 +1431,34 @@ fun PostDialog(
             ?: listOfNotNull(existing?.imageUrl?.takeIf { !it.isNullOrBlank() })
     }
 
-    fun saveListing(imageUrls: List<String>) {
+    fun saveListing(
+        imageUrls: List<String>,
+        publicIds: List<String> = emptyList()
+    ) {
         val ref = if (existing == null) {
             db.collection("listings").document()
         } else {
             db.collection("listings").document(existing.id)
         }
+        val now = System.currentTimeMillis()
+        // The readable date/time pair is only meaningful for perishables.
+        val expiresDate = if (isPerishable && expiresAt > 0) {
+            java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                .format(java.util.Date(expiresAt))
+        } else ""
+        val expiresTime = if (isPerishable && expiresAt > 0) {
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+                .format(java.util.Date(expiresAt))
+        } else ""
+        val keptPhotos = imageUrls.toSet()
+        val replacedPhotos = existingPhotos - keptPhotos
+        // Pair each old photo with its public ID so only the ones that really
+        // left the listing are deleted from Cloudinary.
+        val replacedIds = existing?.let { e ->
+            e.imageUrls.zip(e.cloudinaryPublicIds)
+                .filter { (url, _) -> url !in keptPhotos }
+                .map { (_, publicId) -> publicId }
+        }.orEmpty()
         ref.set(
             Listing(
                 title = title.trim(), description = desc.trim(),
@@ -1426,18 +1467,30 @@ fun PostDialog(
                 sellerId = existing?.sellerId ?: uid,
                 sellerName = existing?.sellerName ?: sellerName,
                 contact = contact.trim(),
-                createdAt = existing?.createdAt?.takeIf { it > 0 }
-                    ?: System.currentTimeMillis(),
+                createdAt = existing?.createdAt?.takeIf { it > 0 } ?: now,
                 latitude = pickup?.latitude, longitude = pickup?.longitude,
                 imageUrl = imageUrls.firstOrNull() ?: "",
                 imageUrls = imageUrls,
+                cloudinaryPublicIds = publicIds,
+                videoUrls = existing?.videoUrls ?: emptyList(),
+                cloudinaryVideoPublicIds = existing?.cloudinaryVideoPublicIds ?: emptyList(),
+                quantity = existing?.quantity ?: 1L,
+                condition = existing?.condition ?: "",
+                status = existing?.status?.takeIf { it.isNotBlank() } ?: "active",
+                pickupAddress = existing?.pickupAddress ?: "",
+                updatedAt = now,
+                expirationDate = expiresDate,
+                expirationTime = expiresTime,
                 isPerishable = isPerishable,
                 expiresAt = if (isPerishable) expiresAt else 0L
             )
         ).addOnSuccessListener {
-            // Replaced photos are no longer referenced: drop them from R2.
-            // Only after the save, so a failed update never loses a photo.
-            if (existing != null) deleteListingImages(existingPhotos - imageUrls.toSet())
+            // Replaced photos are no longer referenced: drop them from
+            // Cloudinary. Only after the save, so a failed update never loses
+            // a photo.
+            if (existing != null) {
+                deleteListingImages(replacedPhotos, replacedIds)
+            }
         }
         onClose()
     }
@@ -1451,10 +1504,13 @@ fun PostDialog(
         val baseUrl = BuildConfig.R2_UPLOAD_URL
         when {
             // No new photo: keep the old ones (when editing).
-            picked.isEmpty() -> saveListing(existingPhotos)
+            picked.isEmpty() -> saveListing(
+                existingPhotos,
+                existing?.cloudinaryPublicIds.orEmpty()
+            )
 
             baseUrl.isBlank() -> {
-                uploadError = "R2_UPLOAD_URL is not set (local.properties or a Gradle property)."
+                uploadError = "The media Worker URL is not set (local.properties or a Gradle property)."
             }
 
             else -> {
@@ -1475,13 +1531,20 @@ fun PostDialog(
                                     val result = withContext(Dispatchers.IO) {
                                         runCatching {
                                             picked.map { uri ->
-                                                uploadListingImage(context, baseUrl, token, uri)
+                                                uploadListingMedia(
+                                                    context, baseUrl, token, uri
+                                                )
                                             }
                                         }
                                     }
                                     uploading = false
                                     result
-                                        .onSuccess { urls -> saveListing(urls) }
+                                        .onSuccess { media ->
+                                            saveListing(
+                                                media.map { it.url },
+                                                media.map { it.publicId }
+                                            )
+                                        }
                                         .onFailure {
                                             uploadError = it.localizedMessage
                                                 ?: "Photo upload failed."
@@ -1924,33 +1987,109 @@ fun compressForUpload(
     return out.toByteArray()
 }
 
+/** A media asset Cloudinary accepted, with the public ID needed later. */
+data class UploadedMedia(val url: String, val publicId: String)
+
 /**
- * Upload the photo to the Cloudflare Worker that stores it in R2.
+ * Ask the Worker for signed Cloudinary upload parameters.
  *
- * The Firebase ID token identifies the user; the Worker builds the R2
- * key from the token's `uid`, so no R2 credentials live in the app.
+ * The signature is made with CLOUDINARY_API_SECRET, which lives only in the
+ * Worker's secrets — the app never sees it, and the upload preset stays
+ * signed. The Firebase ID token identifies the user, and the Worker puts the
+ * token's `uid` in the public ID, so nobody can write into another folder.
  */
-fun uploadListingImage(
-    context: Context,
+fun requestCloudinarySignature(
     baseUrl: String,
     idToken: String,
-    uri: Uri
-): String {
-    // Sent already downscaled, so the Worker and every phone that reads the
-    // listing deal with a few hundred KB instead of several MB.
-    val bytes = compressForUpload(context, uri)
-    val mime = "image/jpeg"
-
-    val conn = URL(baseUrl.trimEnd('/') + "/upload").openConnection() as HttpURLConnection
+    resourceType: String = "image"
+): JSONObject {
+    val conn = URL(baseUrl.trimEnd('/') + "/cloudinary-sign")
+        .openConnection() as HttpURLConnection
     try {
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.connectTimeout = 30_000
-        conn.readTimeout = 60_000
+        conn.readTimeout = 30_000
         conn.setRequestProperty("Authorization", "Bearer $idToken")
-        conn.setRequestProperty("Content-Type", mime)
-        conn.setFixedLengthStreamingMode(bytes.size)
-        conn.outputStream.use { it.write(bytes) }
+        conn.setRequestProperty("Content-Type", "application/json")
+        val payload = JSONObject().put("resourceType", resourceType)
+            .toString().toByteArray()
+        conn.setFixedLengthStreamingMode(payload.size)
+        conn.outputStream.use { it.write(payload) }
+
+        val code = conn.responseCode
+        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) {
+            error("Signing failed ($code): ${body.take(200)}")
+        }
+        return JSONObject(body)
+    } finally {
+        conn.disconnect()
+    }
+}
+
+/**
+ * Upload one photo (or video) straight to Cloudinary with the signed
+ * parameters.
+ *
+ * Photos are sent already downscaled to at most 1600 px at JPEG 80, so every
+ * phone that reads the listing downloads a few hundred KB instead of several
+ * MB. The public ID is returned with the URL because deleting the asset later
+ * needs the ID, not the URL.
+ */
+fun uploadListingMedia(
+    context: Context,
+    baseUrl: String,
+    idToken: String,
+    uri: Uri,
+    resourceType: String = "image"
+): UploadedMedia {
+    val signed = requestCloudinarySignature(baseUrl, idToken, resourceType)
+    val bytes = compressForUpload(context, uri)
+    val isVideo = resourceType == "video"
+    val boundary = "----CamiguinMarket${System.currentTimeMillis()}"
+
+    val conn = URL(signed.getString("uploadUrl")).openConnection() as HttpURLConnection
+    try {
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.doInput = true
+        conn.connectTimeout = 30_000
+        conn.readTimeout = 120_000
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+
+        conn.outputStream.use { out ->
+            fun field(name: String, value: String) {
+                out.write("--$boundary\r\n".toByteArray())
+                out.write(
+                    "Content-Disposition: form-data; name=\"$name\"\r\n\r\n".toByteArray()
+                )
+                out.write(value.toByteArray())
+                out.write("\r\n".toByteArray())
+            }
+
+            // Exactly the values the Worker signed — a mismatch is rejected
+            // by Cloudinary as an invalid signature.
+            field("api_key", signed.getString("apiKey"))
+            field("timestamp", signed.getLong("timestamp").toString())
+            field("signature", signed.getString("signature"))
+            field("folder", signed.getString("folder"))
+            field("public_id", signed.getString("publicId"))
+            field("upload_preset", signed.getString("uploadPreset"))
+            field("overwrite", "false")
+
+            val fileName = if (isVideo) "video.mp4" else "photo.jpg"
+            val mime = if (isVideo) "video/mp4" else "image/jpeg"
+            out.write("--$boundary\r\n".toByteArray())
+            out.write(
+                ("Content-Disposition: form-data; name=\"file\"; " +
+                    "filename=\"$fileName\"\r\n").toByteArray()
+            )
+            out.write("Content-Type: $mime\r\n\r\n".toByteArray())
+            out.write(bytes)
+            out.write("\r\n--$boundary--\r\n".toByteArray())
+        }
 
         val code = conn.responseCode
         val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
@@ -1958,7 +2097,11 @@ fun uploadListingImage(
         if (code !in 200..299) {
             error("Upload failed ($code): ${body.take(200)}")
         }
-        return JSONObject(body).getString("url")
+        val json = JSONObject(body)
+        return UploadedMedia(
+            url = json.getString("secure_url"),
+            publicId = json.getString("public_id")
+        )
     } finally {
         conn.disconnect()
     }
