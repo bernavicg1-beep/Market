@@ -126,8 +126,9 @@ None of the following was observed working:
 2. Cloudinary upload from the app (needs `CLOUDINARY_CLOUD_NAME`,
    `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` set as Worker secrets, then a
    real listing posted from a phone).
-3. Video capture and upload — the UI for it does not exist yet; the schema and
-   signing path do.
+3. ~~Video capture and upload~~ — **intentionally out of scope.** The app uses
+   pictures only; `videoUrls` / `cloudinaryVideoPublicIds` stay in the schema
+   for future use but no UI attaches videos and none is planned.
 4. Map pin tapping/dragging, and live OSRM/Nominatim routing.
 5. WebView callbacks (the bridge is unused; see W5).
 6. Signed release build and Play Console upload (needs the keystore secrets).
